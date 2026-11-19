@@ -1,0 +1,35 @@
+name: Feature / Learning Task
+description: C Web Server 구현과 Top-down 학습을 함께 기록합니다.
+title: "[Area] "
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: 구현 목표
+      description: 외부에서 관찰 가능한 동작과 구현 범위를 적습니다.
+    validations:
+      required: true
+  - type: textarea
+    id: flow
+    attributes:
+      label: 요청 처리 흐름
+      description: TCP → HTTP Parser → Router → Response/Proxy 중 어느 단계이며 어떤 함수가 호출되는지 기록합니다.
+    validations:
+      required: true
+  - type: textarea
+    id: questions
+    attributes:
+      label: 학습 질문
+      description: 사용한 POSIX API, FD 수명주기, 메모리 소유권과 블로킹 동작을 설명합니다.
+  - type: textarea
+    id: tests
+    attributes:
+      label: 테스트 / 완료 조건
+      value: |
+        - [ ] curl 또는 단위 테스트로 정상 동작 검증
+        - [ ] 오류 및 연결 종료 등 실패 조건 검증
+        - [ ] 리소스 정리 및 메모리 오류 확인
+        - [ ] 관련 소스의 함수 호출 흐름 설명
+        - [ ] PR 리뷰 및 테스트 로그 첨부
+    validations:
+      required: true
