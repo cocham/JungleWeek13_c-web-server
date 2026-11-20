@@ -13,9 +13,7 @@ body:
     id: flow
     attributes:
       label: 요청 처리 흐름
-      description: TCP → HTTP Parser → Router → Response/Proxy 중 어느 단계이며 어떤 함수가 호출되는지 기록합니다.
-    validations:
-      required: true
+      description: 영향을 받는 모듈이나 함수 흐름을 적습니다. 협업 이슈라면 작업 순서나 선행 이슈를 적습니다.
   - type: textarea
     id: questions
     attributes:
@@ -25,11 +23,9 @@ body:
     id: tests
     attributes:
       label: 테스트 / 완료 조건
-      value: |
-        - [ ] curl 또는 단위 테스트로 정상 동작 검증
-        - [ ] 오류 및 연결 종료 등 실패 조건 검증
-        - [ ] 리소스 정리 및 메모리 오류 확인
-        - [ ] 관련 소스의 함수 호출 흐름 설명
-        - [ ] PR 리뷰 및 테스트 로그 첨부
+      description: 어떤 방법으로 확인하고 어떤 결과가 나오면 완료인지 적습니다.
+      placeholder: |
+        - [ ] GET /index.html 요청에 200과 HTML 본문이 돌아온다.
+        - [ ] 팀원 3명이 같은 커밋에서 같은 명령으로 서버를 실행한다.
     validations:
       required: true
