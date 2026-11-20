@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>한 줄 방명록</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>한 줄 방명록</h1>
+    <form id="message-form">
+      <label for="message">남길 글</label>
+      <div class="entry">
+        <input id="message" name="message" type="text" required>
+        <button type="submit">등록</button>
+      </div>
+      <p id="submit-status" role="status" hidden></p>
+    </form>
+    <section aria-labelledby="messages-heading">
+      <h2 id="messages-heading">남긴 글</h2>
+      <p id="messages-status" role="status">목록을 불러오는 중입니다.</p>
+      <ul id="messages"></ul>
+    </section>
+  </main>
+</body>
+</html>
