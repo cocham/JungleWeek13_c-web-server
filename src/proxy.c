@@ -46,11 +46,15 @@ static int send_upstream_request(int fd, const struct request *request,
         return -1;
     }
     const char *content_type = request->content_type;
-    char header[HTTP_HEADER_LIMIT + 256];
+    // Ask the backend for GET and drop the content on the way out: the response framing
+    // stays the same and the backend needs no HEAD support (RFC 9110 9.3.2).
+    const char *method = request->head ? "GET" : request->method;
+    // The rebuilt head carries the client's request line and Content-Type, each within its limit.
+    char header[HTTP_REQUEST_HEAD_LIMIT + 256];
     int length = snprintf(header, sizeof header,
         "%s %s HTTP/1.1\r\nHost: %s:%u\r\nVia: 1.1 guestbook\r\n"
         "Content-Length: %zu\r\n%s%s%sConnection: close\r\n\r\n",
-        request->method, request->target, host, (unsigned)ntohs(address->sin_port),
+        method, request->target, host, (unsigned)ntohs(address->sin_port),
         request->body.length, content_type == NULL ? "" : "Content-Type: ",
         content_type == NULL ? "" : content_type, content_type == NULL ? "" : "\r\n");
     if (length < 0 || (size_t)length >= sizeof header) {
@@ -69,7 +73,7 @@ static int proxy_request(int client_fd, const struct request *request,
 {
     int backend_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (backend_fd < 0) {
-        return send_error(client_fd, 502, NULL, deadline_after(CLIENT_WRITE_MS));
+        return send_error_for(client_fd, request, 502, NULL, deadline_after(CLIENT_WRITE_MS));
     }
     fprintf(stderr, "proxy client_fd=%d backend_fd=%d opened\n", client_fd, backend_fd);
     struct upstream_response response;
@@ -86,28 +90,28 @@ static int proxy_request(int client_fd, const struct request *request,
     int64_t deadline = deadline_after(CLIENT_WRITE_MS);
     if (result != UPSTREAM_OK) {
         int status = result == UPSTREAM_TIMEOUT ? 504 : 502;
-        return send_error(client_fd, status, NULL, deadline);
+        return send_error_for(client_fd, request, status, NULL, deadline);
     }
-    return send_response(client_fd, response.status, response.content_type, response.body, deadline);
+    return send_response_for(client_fd, request, response.status, response.content_type,
+                             response.body, deadline);
 }
 
 int route_request(int client_fd, const struct request *request, const struct server_config *config)
 {
     int64_t deadline = deadline_after(CLIENT_WRITE_MS);
-    bool is_get = strcmp(request->method, "GET") == 0;
+    // RFC 9110 9.1: general-purpose servers MUST support GET and HEAD. read_request() has
+    // already answered unimplemented methods with 501, so only GET, HEAD and POST reach here.
+    bool is_get = request->head || strcmp(request->method, "GET") == 0;
     size_t prefix_length = strlen(config->route_prefix);
     if (request_path_length(request) >= prefix_length &&
         strncmp(request->target, config->route_prefix, prefix_length) == 0) {
-        if (!is_get && strcmp(request->method, "POST") != 0) {
-            return send_error(client_fd, 405, "GET, POST", deadline);
-        }
         if (is_get && request->body.length != 0) {
-            return send_error(client_fd, 400, NULL, deadline);
+            return send_error_for(client_fd, request, 400, NULL, deadline);
         }
         return proxy_request(client_fd, request, &config->backend);
     }
     if (!is_get) {
-        return send_error(client_fd, 405, "GET", deadline);
+        return send_error_for(client_fd, request, 405, "GET, HEAD", deadline);
     }
     return serve_static(client_fd, config->static_root_fd, request, deadline);
 }
