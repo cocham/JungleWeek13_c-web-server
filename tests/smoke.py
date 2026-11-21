@@ -86,9 +86,82 @@ def check_static():
     print("Static HTML/CSS/JS and MIME: 200; missing file: 404", flush=True)
 
 
+HEADER_LIMIT = 8192
+
+
+def exchange_raw(wire):
+    """Send raw bytes and read until the server closes, returning (status, headers, body)."""
+    with socket.create_connection(FRONT, timeout=5) as sock:
+        sock.sendall(wire)
+        received = bytearray()
+        while chunk := sock.recv(65536):
+            received.extend(chunk)
+    head, _, body = bytes(received).partition(b"\r\n\r\n")
+    lines = head.decode("latin-1").split("\r\n")
+    headers = {}
+    for line in lines[1:]:
+        name, _, value = line.partition(":")
+        headers[name.strip().lower()] = value.strip()
+    return int(lines[0].split(" ")[1]), headers, body
+
+
+def fill_header_limit(prefix):
+    # Exactly the limit, so the server reads every byte and closes without a reset.
+    assert len(prefix) < HEADER_LIMIT
+    return prefix + b"a" * (HEADER_LIMIT - len(prefix))
+
+
+def check_http_boundaries():
+    # RFC 9112 3: a request-target that is too long gets 414, even if it fills the header buffer.
+    for name, wire in (
+        ("request line over header limit", fill_header_limit(b"GET /")),
+        ("long target with large headers",
+         fill_header_limit(b"GET /" + b"a" * 2100 + b" HTTP/1.1\r\nHost: localhost\r\nX-Pad: ")),
+    ):
+        status, _, _ = exchange_raw(wire)
+        assert status == 414, (name, status)
+    status, _, _ = exchange_raw(fill_header_limit(b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Pad: "))
+    assert status == 431, status
+    print("Oversized request line: 414; oversized header fields: 431")
+
+    # RFC 9112 3.2.2: absolute-form is accepted, and its authority replaces Host.
+    for target, expected_media in (
+        (b"http://localhost:8080/style.css", "text/css; charset=utf-8"),
+        (b"HTTP://localhost:8080", "text/html; charset=utf-8"),
+        (b"http://localhost:8080?x=1", "text/html; charset=utf-8"),
+        (b"http://localhost:8080/api/messages", "application/json; charset=utf-8"),
+    ):
+        status, headers, body = exchange_raw(
+            b"GET " + target + b" HTTP/1.1\r\nHost: elsewhere.example\r\n\r\n")
+        assert status == 200 and headers["content-type"] == expected_media and body, target
+    for target in (b"ftp://localhost/", b"http:///style.css", b"http://user@localhost/"):
+        status, _, _ = exchange_raw(b"GET " + target + b" HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        assert status == 400, (target, status)
+    print("Absolute-form targets: 200; other schemes and bad authorities: 400")
+
+    # RFC 9110 9.3.2: HEAD has GET's header fields but never content, including on errors.
+    for path, expected in (("/", 200), ("/style.css", 200), (API, 200), ("/no-such-file", 404)):
+        get_status, get_headers, get_body = exchange_raw(
+            f"GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode("ascii"))
+        status, headers, body = exchange_raw(
+            f"HEAD {path} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode("ascii"))
+        assert (status, body) == (expected, b""), (path, status, body)
+        assert get_status == expected and headers["content-type"] == get_headers["content-type"]
+        if path != API:  # The message list may change between the two requests.
+            assert headers["content-length"] == str(len(get_body)), path
+    status, headers, body = exchange_raw(b"HEAD / HTTP/1.1\r\n\r\n")
+    assert (status, body) == (400, b"") and headers["content-length"] != "0"
+    status, headers, _ = exchange_raw(b"PUT / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    assert status == 405 and headers["allow"] == "GET, HEAD", headers
+    status, headers, _ = exchange_raw(f"PUT {API} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode())
+    assert status == 405 and headers["allow"] == "GET, HEAD, POST", headers
+    print("HEAD: GET's status and headers with no content; Allow lists HEAD")
+
+
 def check_normal():
     wait_for_backend()
     check_static()
+    check_http_boundaries()
     media, before = expect_status(200, "GET", API)
     assert media == "application/json; charset=utf-8", media
     before = json.loads(before)["messages"]

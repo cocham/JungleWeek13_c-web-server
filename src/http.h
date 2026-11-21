@@ -1,6 +1,7 @@
 #ifndef HTTP_H
 #define HTTP_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -20,9 +21,12 @@ struct request {
     // All returned views borrow storage from this object.
     char bytes[HTTP_HEADER_LIMIT + HTTP_REQUEST_BODY_LIMIT];
     const char *method;
+    // Always origin-form: an absolute-form target is rewritten to its path and query.
     const char *target;
     const char *content_type;
     struct http_body body;
+    // Set as soon as the method is parsed, so even error replies to HEAD omit content.
+    bool head;
 };
 
 struct upstream_response {
@@ -45,5 +49,10 @@ int send_response_head(int fd, int status, const char *content_type,
 int send_response(int fd, int status, const char *content_type,
                   struct http_body body, int64_t deadline);
 int send_error(int fd, int status, const char *allow, int64_t deadline);
+// Like send_response()/send_error(), but send only the head when the request was HEAD.
+int send_response_for(int fd, const struct request *request, int status,
+                      const char *content_type, struct http_body body, int64_t deadline);
+int send_error_for(int fd, const struct request *request, int status,
+                   const char *allow, int64_t deadline);
 
 #endif

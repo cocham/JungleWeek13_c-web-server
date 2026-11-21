@@ -123,21 +123,25 @@ static int open_static_file(int root_fd, char *path, int *file_fd)
     return status;
 }
 
-static int send_static_file(int client_fd, int file_fd, const char *content_type, int64_t deadline)
+static int send_static_file(int client_fd, const struct request *request, int file_fd,
+                            const char *content_type, int64_t deadline)
 {
     struct stat info;
     if (fstat(file_fd, &info) < 0) {
-        return send_error(client_fd, 500, NULL, deadline);
+        return send_error_for(client_fd, request, 500, NULL, deadline);
     }
     if (!S_ISREG(info.st_mode)) {
-        return send_error(client_fd, 403, NULL, deadline);
+        return send_error_for(client_fd, request, 403, NULL, deadline);
     }
     if (info.st_size < 0 || (uintmax_t)info.st_size > SIZE_MAX) {
-        return send_error(client_fd, 500, NULL, deadline);
+        return send_error_for(client_fd, request, 500, NULL, deadline);
     }
     size_t remaining = (size_t)info.st_size;
     if (send_response_head(client_fd, 200, content_type, remaining, NULL, deadline) < 0) {
         return -1;
+    }
+    if (request->head) {
+        return 0; // Same Content-Length as GET, no content (RFC 9110 9.3.2).
     }
     char buffer[16384];
     while (remaining > 0) {
@@ -159,15 +163,15 @@ int serve_static(int client_fd, int root_fd, const struct request *request, int6
     char path[HTTP_TARGET_LIMIT + 1];
     int status = decode_path(request, path);
     if (status != 200) {
-        return send_error(client_fd, status, NULL, deadline);
+        return send_error_for(client_fd, request, status, NULL, deadline);
     }
     const char *content_type = mime_type(path);
     int file_fd = -1;
     status = open_static_file(root_fd, path, &file_fd);
     if (status != 200) {
-        return send_error(client_fd, status, NULL, deadline);
+        return send_error_for(client_fd, request, status, NULL, deadline);
     }
-    int result = send_static_file(client_fd, file_fd, content_type, deadline);
+    int result = send_static_file(client_fd, request, file_fd, content_type, deadline);
     close(file_fd);
     return result;
 }

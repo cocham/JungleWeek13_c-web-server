@@ -59,6 +59,45 @@ static bool valid_token(const char *text)
     return true;
 }
 
+// Host and an absolute-form authority share the grammar uri-host [ ":" port ] (RFC 9110 7.2).
+static bool valid_host(const char *text, size_t length)
+{
+    if (length == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < length; ++i) {
+        if (strchr(" \t,/?#@\\", text[i]) != NULL) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// RFC 9112 3.2.2: an origin server MUST accept absolute-form and use its authority instead
+// of Host. Rewrite it in place to the origin-form that routing and proxying expect.
+static bool take_origin_form(char **target)
+{
+    char *text = *target;
+    if (text[0] == '/') {
+        return true;
+    }
+    if (strncasecmp(text, "http://", sizeof "http://" - 1) != 0) {
+        return false;
+    }
+    char *authority = text + sizeof "http://" - 1;
+    size_t length = strcspn(authority, "/?");
+    if (!valid_host(authority, length)) {
+        return false;
+    }
+    char *path = authority + length;
+    if (*path != '/') {
+        // An empty path means "/" (RFC 9110 4.2.3); the authority's last byte is free for it.
+        *--path = '/';
+    }
+    *target = path;
+    return true;
+}
+
 static int parse_request_line(char *line, struct request *request)
 {
     char *target = strchr(line, ' ');
@@ -71,9 +110,11 @@ static int parse_request_line(char *line, struct request *request)
         return 400;
     }
     *version++ = '\0';
-    if (!valid_token(line) || target[0] != '/') {
+    if (!valid_token(line)) {
         return 400;
     }
+    request->method = line;
+    request->head = strcmp(line, "HEAD") == 0;
     if (strlen(target) > HTTP_TARGET_LIMIT) {
         return 414;
     }
@@ -90,7 +131,9 @@ static int parse_request_line(char *line, struct request *request)
     if (strcmp(version, "HTTP/1.1") != 0) {
         return 505;
     }
-    request->method = line;
+    if (!take_origin_form(&target)) {
+        return 400;
+    }
     request->target = target;
     return 200;
 }
@@ -246,11 +289,34 @@ static int request_status(enum wire_result result)
     return 500;
 }
 
+// RFC 9112 3 says a too-long target MUST get 414, so a full header buffer is not always 431.
+static int oversized_head_status(struct request *request, size_t used)
+{
+    char *bytes = request->bytes;
+    size_t end = 0;
+    while (end + 1 < used && (bytes[end] != '\r' || bytes[end + 1] != '\n')) {
+        ++end;
+    }
+    if (end + 1 >= used) {
+        return 414; // The request line alone did not fit.
+    }
+    if (memchr(bytes, '\0', end) != NULL) {
+        return 400;
+    }
+    bytes[end] = '\0';
+    int status = parse_request_line(bytes, request);
+    return status == 200 ? 431 : status;
+}
+
 int read_request(int fd, struct request *request, int64_t deadline)
 {
     size_t used = 0;
     size_t head_length = 0;
+    request->head = false;
     enum wire_result result = read_head(fd, request->bytes, &used, &head_length, deadline);
+    if (result == WIRE_LIMIT) {
+        return oversized_head_status(request, used);
+    }
     if (result != WIRE_OK) {
         return request_status(result);
     }
@@ -261,8 +327,9 @@ int read_request(int fd, struct request *request, int64_t deadline)
         return status;
     }
     struct fields fields = {0};
-    if (!parse_fields(cursor, &fields) || fields.host == NULL || *fields.host == '\0' ||
-        strpbrk(fields.host, " \t,/?#@\\") != NULL ||
+    // RFC 9112 3.2: Host is still required and validated, even when absolute-form overrides it.
+    if (!parse_fields(cursor, &fields) || fields.host == NULL ||
+        !valid_host(fields.host, strlen(fields.host)) ||
         (fields.length != NULL && fields.transfer_encoding)) {
         return 400;
     }
@@ -390,7 +457,7 @@ int send_response(int fd, int status, const char *content_type,
     return send_all(fd, body.data, body.length, deadline);
 }
 
-int send_error(int fd, int status, const char *allow, int64_t deadline)
+static int send_error_reply(int fd, int status, const char *allow, bool head, int64_t deadline)
 {
     char body[96];
     int length = snprintf(body, sizeof body, "%s\n", reason_phrase(status));
@@ -399,5 +466,26 @@ int send_error(int fd, int status, const char *allow, int64_t deadline)
                            (size_t)length, allow, deadline) < 0) {
         return -1;
     }
-    return send_all(fd, body, (size_t)length, deadline);
+    return head ? 0 : send_all(fd, body, (size_t)length, deadline);
+}
+
+int send_error(int fd, int status, const char *allow, int64_t deadline)
+{
+    return send_error_reply(fd, status, allow, false, deadline);
+}
+
+// RFC 9110 9.3.2: a HEAD response has the same header fields as GET but MUST NOT carry content.
+int send_response_for(int fd, const struct request *request, int status,
+                      const char *content_type, struct http_body body, int64_t deadline)
+{
+    if (request->head) {
+        return send_response_head(fd, status, content_type, body.length, NULL, deadline);
+    }
+    return send_response(fd, status, content_type, body, deadline);
+}
+
+int send_error_for(int fd, const struct request *request, int status,
+                   const char *allow, int64_t deadline)
+{
+    return send_error_reply(fd, status, allow, request->head, deadline);
 }

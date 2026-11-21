@@ -58,7 +58,7 @@ static void handle_client(int client_fd, int64_t read_deadline, const void *cont
     if (status == 200) {
         (void)route_request(client_fd, &request, config);
     } else if (status != 0) {
-        (void)send_error(client_fd, status, NULL, deadline_after(CLIENT_WRITE_MS));
+        (void)send_error_for(client_fd, &request, status, NULL, deadline_after(CLIENT_WRITE_MS));
     }
 }
 
