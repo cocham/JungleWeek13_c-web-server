@@ -49,7 +49,8 @@ static int send_upstream_request(int fd, const struct request *request,
     // Ask the backend for GET and drop the content on the way out: the response framing
     // stays the same and the backend needs no HEAD support (RFC 9110 9.3.2).
     const char *method = request->head ? "GET" : request->method;
-    char header[HTTP_HEADER_LIMIT + 256];
+    // The rebuilt head carries the client's request line and Content-Type, each within its limit.
+    char header[HTTP_REQUEST_HEAD_LIMIT + 256];
     int length = snprintf(header, sizeof header,
         "%s %s HTTP/1.1\r\nHost: %s:%u\r\nVia: 1.1 guestbook\r\n"
         "Content-Length: %zu\r\n%s%s%sConnection: close\r\n\r\n",
@@ -98,14 +99,12 @@ static int proxy_request(int client_fd, const struct request *request,
 int route_request(int client_fd, const struct request *request, const struct server_config *config)
 {
     int64_t deadline = deadline_after(CLIENT_WRITE_MS);
-    // RFC 9110 9.1: general-purpose servers MUST support GET and HEAD.
+    // RFC 9110 9.1: general-purpose servers MUST support GET and HEAD. read_request() has
+    // already answered unimplemented methods with 501, so only GET, HEAD and POST reach here.
     bool is_get = request->head || strcmp(request->method, "GET") == 0;
     size_t prefix_length = strlen(config->route_prefix);
     if (request_path_length(request) >= prefix_length &&
         strncmp(request->target, config->route_prefix, prefix_length) == 0) {
-        if (!is_get && strcmp(request->method, "POST") != 0) {
-            return send_error_for(client_fd, request, 405, "GET, HEAD, POST", deadline);
-        }
         if (is_get && request->body.length != 0) {
             return send_error_for(client_fd, request, 400, NULL, deadline);
         }
