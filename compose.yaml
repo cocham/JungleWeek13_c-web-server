@@ -1,0 +1,29 @@
+x-guestbook: &guestbook
+  image: "${COMPOSE_PROJECT_NAME}-guestbook:local"
+  pull_policy: never
+  stop_grace_period: 10s
+
+services:
+  front:
+    <<: *guestbook
+    build: .
+    ports:
+      - "127.0.0.1:${GUESTBOOK_PORT:-8080}:8080"
+
+  backend:
+    <<: *guestbook
+    entrypoint: ["/usr/local/bin/guestbook-backend"]
+    network_mode: "service:front"
+    depends_on:
+      front:
+        condition: service_started
+        restart: true
+
+  smoke:
+    image: python:3.12-slim-trixie
+    profiles: [test]
+    network_mode: "service:front"
+    volumes:
+      - ./tests:/checks:ro
+    entrypoint: ["python", "/checks/smoke.py"]
+    command: ["normal"]
