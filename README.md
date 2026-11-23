@@ -27,6 +27,7 @@ docker compose down
 | --- | --- | --- |
 | `GET /api/messages` | 본문 없음 | `200`과 `{"messages":["…"]}` |
 | `POST /api/messages` | UTF-8 평문 한 줄, `Content-Type: text/plain; charset=utf-8`, 바이트 단위 `Content-Length` | `201`과 `{"message":"…"}` |
+| `POST /api/echo` | 아무 바이트 최대 4096바이트, 선택적 `Content-Type` | `200`과 받은 본문·`Content-Type` 그대로(없으면 `application/octet-stream`). 프록시 본문 중계 검증용 |
 
 빈 글, 잘못된 UTF-8, 개행이 포함된 글은 400이다. 본문 길이 선언이 없는 POST는 411, 길이 초과는 413, 지원 범위 밖의 미디어 유형은 415, 저장 공간이 가득 차면 409다. 백엔드 오류가 나면 화면에서 조회·등록 오류를 확인할 수 있다. 등록 시간이 초과되면 입력값을 유지하므로, 다시 등록하기 전에 목록에서 결과를 확인할 수 있다.
 
@@ -62,7 +63,13 @@ Windows PowerShell에서는 실행 파일 이름을 `curl.exe`로 적는다.
 docker compose run --rm --no-deps smoke
 ```
 
-HTML·CSS·JavaScript MIME, 없는 파일 404, 분할 POST와 재조회, 입력 오류, 동시 GET을 확인한다. 정상 검사 한 번마다 검증용 글 한 건이 방명록에 남는다.
+HTML·CSS·JavaScript MIME, 없는 파일 404, 분할 POST와 재조회, 입력 오류, 동시 GET을 확인한다. `/api/echo`로 본문 바이트가 프록시를 그대로 통과하는지, `Content-Length` 과소·과대·조기 종료·시간 초과와 전송 인코딩 거부, 오류 응답마다 `Content-Length`와 실제 본문 길이·`Connection: close`가 맞는지도 확인한다. 정상 검사 한 번마다 검증용 글 한 건이 방명록에 남는다.
+
+HTTP 파서·응답 생성·`send_all()` 부분 송신은 `tests/test_http.c`가 `socketpair()`로 서버 없이 검사한다. 저장소를 읽기 전용으로 붙이고 컨테이너 안 복사본에서 빌드한다.
+
+```sh
+docker run --rm -v "$PWD:/repo:ro" gcc:14-trixie bash -c "cp -r /repo /tmp/w && make -C /tmp/w unit"
+```
 
 실패 경로 검사는 테스트용 방명록에서 실행한다. 백엔드 중지로 현재 저장된 글이 초기화된다.
 

@@ -198,13 +198,32 @@ static void handle_messages(int client_fd, const struct request *request, int64_
     }
 }
 
+// 받은 본문과 Content-Type을 그대로 돌려준다. 앞단이 본문 바이트를 바꾸지 않고
+// Content-Length 그대로 중계하는지 확인하는 검증용 경로이며 방명록 저장소는 쓰지 않는다.
+static void send_echo(int client_fd, const struct request *request, int64_t deadline)
+{
+    const char *type = request->content_type;
+    (void)send_response(client_fd, 200,
+                        type == NULL || *type == '\0' ? "application/octet-stream" : type,
+                        request->body, deadline);
+}
+
+static bool is_echo(const struct request *request)
+{
+    const char path[] = "/api/echo";
+    return request_path_length(request) == sizeof path - 1 &&
+           strncmp(request->target, path, sizeof path - 1) == 0;
+}
+
 static void handle_backend_connection(int client_fd, int64_t read_deadline, const void *context)
 {
     (void)context;
     struct request request;
     int status = read_request(client_fd, &request, read_deadline);
     int64_t deadline = deadline_after(CLIENT_WRITE_MS);
-    if (status == 200) {
+    if (status == 200 && is_echo(&request)) {
+        send_echo(client_fd, &request, deadline);
+    } else if (status == 200) {
         handle_messages(client_fd, &request, deadline);
     } else if (status != 0) {
         (void)send_error(client_fd, status, NULL, deadline);
