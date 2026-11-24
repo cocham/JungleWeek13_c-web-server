@@ -143,6 +143,9 @@ static int send_static_file(int client_fd, const struct request *request, int fi
     if (request->head) {
         return 0; // Same Content-Length as GET, no content (RFC 9110 9.3.2).
     }
+    // 본문은 조각마다 CLIENT_WRITE_MS를 새로 준다. 응답 전체에 기한 하나를 걸면 큰 파일이나
+    // 느린 클라이언트는 정상적으로 받고 있어도 중간에 끊긴다. 조각 하나를 그 시간 안에 받지
+    // 못하는 클라이언트만 끊으므로 작업자를 무한정 붙잡히지도 않는다.
     char buffer[16384];
     while (remaining > 0) {
         size_t capacity = remaining < sizeof buffer ? remaining : sizeof buffer;
@@ -150,7 +153,9 @@ static int send_static_file(int client_fd, const struct request *request, int fi
         if (count < 0 && errno == EINTR) {
             continue;
         }
-        if (count <= 0 || send_all(client_fd, buffer, (size_t)count, deadline) < 0) {
+        // 0은 전송 도중 파일이 줄어든 경우다. Content-Length를 이미 보냈으니 연결을 끊는다.
+        if (count <= 0 ||
+            send_all(client_fd, buffer, (size_t)count, deadline_after(CLIENT_WRITE_MS)) < 0) {
             return -1;
         }
         remaining -= (size_t)count;
