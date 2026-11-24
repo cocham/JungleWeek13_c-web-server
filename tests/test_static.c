@@ -60,7 +60,9 @@ static void sleep_ms(int milliseconds)
 //   root/                       문서 루트
 //     index.html  style.css  app.js  logo.png  photo.JPG  photo.jpeg  notes.txt  README
 //     big.bin                   BIG_SIZE 바이트
-//     sub/page.html             하위 디렉터리
+//     sub/page.html  sub/index.html   index가 있는 하위 디렉터리
+//     empty/                    index가 없는 하위 디렉터리
+//     odd/index.html/           index.html이라는 이름의 디렉터리
 //     locked.html               권한 000
 //     pipe                      FIFO
 //     link-in.html -> index.html
@@ -140,6 +142,10 @@ static void build_root(void)
     WRITE_TEXT("root/README", "readme\n");
     make_dir("root/sub");
     WRITE_TEXT("root/sub/page.html", "<p>sub</p>\n");
+    WRITE_TEXT("root/sub/index.html", "<p>sub index</p>\n");
+    make_dir("root/empty");
+    make_dir("root/odd");
+    make_dir("root/odd/index.html");
     write_file("root/locked.html", "locked", 6, 0000);
     char pipe_path[PATH_MAX];
     path_in(pipe_path, "root/pipe");
@@ -172,7 +178,8 @@ static void remove_root(void)
 {
     static const char *const entries[] = {
         "root/link-dir", "root/link-out.txt", "root/link-in.html", "root/pipe",
-        "root/locked.html", "root/sub/page.html", "root/big.bin", "root/README",
+        "root/locked.html", "root/sub/index.html", "root/sub/page.html", "root/big.bin",
+        "root/README",
         "root/notes.txt", "root/photo.jpeg", "root/photo.JPG", "root/logo.png", "root/app.js",
         "root/style.css", "root/index.html", "outside/secret.txt",
     };
@@ -181,7 +188,9 @@ static void remove_root(void)
         path_in(path, entries[i]);
         unlink(path);
     }
-    static const char *const directories[] = {"root/sub", "root", "outside"};
+    static const char *const directories[] = {
+        "root/odd/index.html", "root/odd", "root/empty", "root/sub", "root", "outside",
+    };
     for (size_t i = 0; i < sizeof directories / sizeof directories[0]; ++i) {
         char path[PATH_MAX];
         path_in(path, directories[i]);
@@ -246,6 +255,7 @@ struct reply {
     int result;
     int status;
     char content_type[128];
+    char location[256];
     long long content_length;
     const char *body;
     size_t body_length;
@@ -321,6 +331,7 @@ static struct reply serve(const char *method, const char *target, enum reader_mo
     if (end != NULL && sscanf(reply_bytes, "HTTP/1.1 %d", &reply.status) == 1) {
         *end = '\0';
         header_value(reply_bytes, "Content-Type", reply.content_type, sizeof reply.content_type);
+        header_value(reply_bytes, "Location", reply.location, sizeof reply.location);
         char length[32];
         header_value(reply_bytes, "Content-Length", length, sizeof length);
         if (length[0] != '\0') {
@@ -417,11 +428,16 @@ static void test_missing_and_forbidden(void)
     // 파일을 디렉터리처럼 쓰면 ENOTDIR이다.
     EXPECT_STATUS("/index.html/", 403);
     EXPECT_STATUS("/index.html/x", 403);
-    // 디렉터리는 루트("/" → index.html)만 index를 준다.
+    // '/'로 끝나는 디렉터리 요청은 그 안의 index.html이다. 없으면 404다.
     EXPECT_STATUS("/", 200);
-    EXPECT_STATUS("/sub", 403);
-    EXPECT_STATUS("/sub/", 403);
+    EXPECT_STATUS("/sub/", 200);
     EXPECT_STATUS("/sub/page.html", 200);
+    EXPECT_STATUS("/empty/", 404);
+    // index.html이 디렉터리면 일반 파일이 아니므로 403이고, 다시 리디렉션하지 않는다.
+    EXPECT_STATUS("/odd/", 403);
+    // 디렉터리 안의 빈 조각은 여전히 403이다.
+    EXPECT_STATUS("/sub//", 403);
+    EXPECT_STATUS("/sub//page.html", 403);
     // FIFO는 O_NONBLOCK 덕분에 열 때 멈추지 않고, 일반 파일이 아니라서 거절된다.
     EXPECT_STATUS("/pipe", 403);
     if (geteuid() == 0) {
@@ -466,6 +482,53 @@ static void test_mime(void)
     EXPECT_FILE("/notes.txt", "application/octet-stream", "notes\n");
     EXPECT_FILE("/README", "application/octet-stream", "readme\n");
     EXPECT_FILE("/sub/page.html", "text/html; charset=utf-8", "<p>sub</p>\n");
+    // 하위 디렉터리 index도 확장자는 index.html 기준이다.
+    EXPECT_FILE("/sub/", "text/html; charset=utf-8", "<p>sub index</p>\n");
+    EXPECT_FILE("/sub/?x=1", "text/html; charset=utf-8", "<p>sub index</p>\n");
+}
+
+// ---------------------------------------------------------------------------
+// '/' 없이 디렉터리를 가리킨 요청의 301
+
+static void expect_redirect(const char *method, const char *target, const char *location,
+                            int line)
+{
+    static const char body[] = "Moved Permanently\n";
+    struct reply reply = serve(method, target, READ_ALL, 0, CLIENT_WRITE_MS);
+    bool head = strcmp(method, "HEAD") == 0;
+    ++checks;
+    bool ok = reply.result == 0 && reply.status == 301 && strcmp(reply.location, location) == 0 &&
+              reply.content_length == (long long)(sizeof body - 1) &&
+              reply.body_length == (head ? 0 : sizeof body - 1) &&
+              (head || memcmp(reply.body, body, sizeof body - 1) == 0);
+    if (!ok) {
+        ++failures;
+        fprintf(stderr, "test_static.c:%d: %s %s: status %d, Location \"%s\", length %lld/%zu\n",
+                line, method, target, reply.status, reply.location, reply.content_length,
+                reply.body_length);
+    }
+}
+
+#define EXPECT_REDIRECT(target, location) expect_redirect("GET", (target), (location), __LINE__)
+
+static void test_directory_redirect(void)
+{
+    EXPECT_REDIRECT("/sub", "/sub/");
+    EXPECT_REDIRECT("/empty", "/empty/");
+    EXPECT_REDIRECT("/odd", "/odd/");
+    // 질의와 %XX는 요청에 온 그대로 둔다.
+    EXPECT_REDIRECT("/sub?x=1&y=/", "/sub/?x=1&y=/");
+    EXPECT_REDIRECT("/%73ub", "/%73ub/");
+    expect_redirect("HEAD", "/sub", "/sub/", __LINE__);
+    // 리디렉션은 실제로 연 디렉터리에만 준다. 링크·빈 조각·루트 밖은 그 전에 거절되므로
+    // Location이 "//host"(다른 사이트로 가는 주소)가 되는 일이 없다.
+    EXPECT_STATUS("/link-dir", 403);
+    EXPECT_STATUS("//sub", 403);
+    EXPECT_STATUS("/%2fsub", 403);
+    EXPECT_STATUS("//evil.example", 403);
+    EXPECT_STATUS("/%2f%2fevil.example", 403);
+    EXPECT_STATUS("/sub/..", 403);
+    EXPECT_STATUS("/no-such-dir", 404);
 }
 
 // ---------------------------------------------------------------------------
@@ -516,6 +579,9 @@ static void test_client_abort(void)
         (void)get("/no-such-dir/index.html");
         (void)get("/sub/page.html/");
         (void)get("/sub");
+        (void)get("/sub/");
+        (void)get("/odd/");
+        (void)get("/empty/");
     }
     CHECK(open_fd_count() == before);
 }
@@ -534,6 +600,7 @@ int main(void)
     test_symlinks();
     test_missing_and_forbidden();
     test_mime();
+    test_directory_redirect();
     test_big_file();
     test_client_abort();
     remove_root();

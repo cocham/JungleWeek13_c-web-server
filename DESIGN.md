@@ -19,7 +19,7 @@
 1. 브라우저의 등록 버튼이 `fetch('/api/messages', { method: 'POST', ... })`를 호출한다. TCP 3-way handshake는 커널이 처리한다. `open_listener()`의 `socket → setsockopt(SO_REUSEADDR) → bind → listen`을 거쳐 `accept_clients()`의 `accept()`가 **클라이언트 FD**를 얻는다. `bind()` 실패는 오류를 기록하고 종료한다.
 2. `accept_clients()`가 클라이언트 FD와 수락 시각에서 계산한 읽기 기한을 제한된 FIFO 작업 큐에 넣는다. pthread의 `worker_main()`이 꺼내 `handle_client()`에 전달한다. 작업자는 한 연결을 순서대로 처리하고, `poll()` 및 논블로킹 I/O로 각 단계의 대기 한도를 적용한다.
 3. `read_request()`가 요청 줄, 헤더, 본문을 구분한다. 나눠 들어오는 `\r\n\r\n`을 찾아 그 뒤 이미 받은 바이트를 유지하고 `Content-Length`에 맞춰 남은 바이트를 읽는다. 요청 저장 공간은 작업자 소유이며 필드를 가리키는 포인터는 해당 요청을 처리하는 동안 유효하다.
-4. `route_request()`는 질의 문자열을 제외한 경로로 분기한다. 정적 GET이면 `serve_static()`이 `/`를 `index.html`에 매핑해 지정 루트에서 파일을 열고 MIME을 정한다. API 경로면 `proxy_request()`가 별도의 **백엔드 FD**를 `socket()`으로 열고 설정된 주소에 `connect()`한다. 검증한 메서드·대상·본문을 보내고 `Host`, `Content-Length`, `Connection`을 다시 만든다. 기준 API에 필요한 `Content-Type`만 전달하고 연결별 헤더는 전달하지 않는다.
+4. `route_request()`는 질의 문자열을 제외한 경로로 분기한다. 정적 GET이면 `serve_static()`이 `/`로 끝나는 경로를 그 디렉터리의 `index.html`에 매핑해 지정 루트에서 파일을 열고 MIME을 정한다. `/`를 빼고 디렉터리를 가리키면 `/`를 붙인 경로로 301을 보낸다. API 경로면 `proxy_request()`가 별도의 **백엔드 FD**를 `socket()`으로 열고 설정된 주소에 `connect()`한다. 검증한 메서드·대상·본문을 보내고 `Host`, `Content-Length`, `Connection`을 다시 만든다. 기준 API에 필요한 `Content-Type`만 전달하고 연결별 헤더는 전달하지 않는다.
 5. 백엔드 `handle_messages()`가 같은 HTTP 경계 규칙으로 읽어 성공한 POST의 글을 메모리에 저장한 뒤 `201`과 JSON을 보낸다. `read_upstream_response()`가 상태 줄·헤더·선언된 본문 전체를 검증한다. `proxy_request()`가 백엔드 FD를 닫고 `send_response()`가 확인한 상태·본문을 클라이언트 FD에 보낸다. 송신은 전송이 끝날 때까지 남은 바이트를 반복 처리한다.
 6. 작업자가 클라이언트 FD를 닫고 요청 메모리의 수명이 끝난다. 브라우저는 등록 성공 후 `GET /api/messages`로 목록을 다시 읽는다. 프록시가 502/504를 반환하면 화면에 요청 오류를 표시한다. 정적 GET은 같은 서버에서 계속 처리된다.
 

@@ -66,5 +66,8 @@ int send_response_for(int fd, const struct request *request, int status,
                       const char *content_type, struct http_body body, int64_t deadline);
 int send_error_for(int fd, const struct request *request, int status,
                    const char *allow, int64_t deadline);
+// 301 with a Location field; location must be a validated origin-form path (no CR or LF).
+int send_redirect_for(int fd, const struct request *request, const char *location,
+                      int64_t deadline);
 
 #endif
