@@ -523,11 +523,27 @@ static void test_upstream(void)
     CHECK(upstream.status == 201 && BODY_IS(upstream.body, "hello") &&
           strcmp(upstream.content_type, "application/octet-stream") == 0);
 
+    CHECK(UPSTREAM_EOF(TEXT("HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n"
+                            "2;note=\"example\"\r\nhe\r"),
+                       TEXT("\n3\r\nllo\r\n0\r\nX-Trailer: ignored\r\n\r\n")) == UPSTREAM_OK);
+    CHECK(upstream.status == 200 && BODY_IS(upstream.body, "hello"));
+    CHECK(UPSTREAM_EOF(TEXT("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")) ==
+          UPSTREAM_OK);
+    CHECK(upstream.body.length == 0);
+
     static const char *const invalid[] = {
         "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokk",        // 선언보다 많음
         "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nok",         // 선언보다 적고 EOF
         "HTTP/1.1 200 OK\r\n\r\nok",                              // 길이 없음
         "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhe",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nheX\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10001\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;=bad\r\nx\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\ninvalid-trailer\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
         "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\nok",
         "HTTP/1.1 200 OK\r\nContent-Length: 65537\r\n\r\n",
         "HTTP/1.1 100 Continue\r\n\r\n",
@@ -549,6 +565,8 @@ static void test_upstream(void)
     CHECK(UPSTREAM_OPEN(TEXT("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nok")) ==
           UPSTREAM_TIMEOUT);
     CHECK(UPSTREAM_OPEN(TEXT("HTTP/1.1 200 OK\r\n")) == UPSTREAM_TIMEOUT);
+    CHECK(UPSTREAM_OPEN(TEXT("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhe")) ==
+          UPSTREAM_TIMEOUT);
 }
 
 int main(void)
