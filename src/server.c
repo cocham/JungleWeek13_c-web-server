@@ -4,6 +4,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,7 +18,8 @@ static bool valid_route_prefix(const char *prefix)
 }
 
 static bool parse_options(int argc, char **argv, uint16_t *port,
-                          const char **static_root, struct server_config *config)
+                          const char **static_root, const char **backend_host,
+                          uint16_t *backend_port, struct server_config *config)
 {
     for (int i = 1; i < argc; i += 2) {
         if (i + 1 == argc) {
@@ -34,19 +36,37 @@ static bool parse_options(int argc, char **argv, uint16_t *port,
         } else if (strcmp(option, "--route-prefix") == 0 && valid_route_prefix(value)) {
             config->route_prefix = value;
         } else if (strcmp(option, "--backend-address") == 0) {
-            if (inet_pton(AF_INET, value, &config->backend.sin_addr) != 1) {
-                return false;
-            }
+            *backend_host = value;
         } else if (strcmp(option, "--backend-port") == 0) {
-            uint16_t backend_port;
-            if (!parse_port(value, &backend_port)) {
+            if (!parse_port(value, backend_port)) {
                 return false;
             }
-            config->backend.sin_port = htons(backend_port);
         } else {
             return false;
         }
     }
+    return true;
+}
+
+static bool resolve_backend(const char *host, uint16_t port, struct sockaddr_in *address)
+{
+    char service[sizeof "65535"];
+    snprintf(service, sizeof service, "%u", (unsigned)port);
+
+    const struct addrinfo hints = {
+        .ai_family = AF_INET,
+        .ai_socktype = SOCK_STREAM,
+        .ai_flags = AI_NUMERICSERV
+    };
+    struct addrinfo *result;
+    int error = getaddrinfo(host, service, &hints, &result);
+    if (error != 0) {
+        fprintf(stderr, "resolve backend %s:%s: %s\n", host, service, gai_strerror(error));
+        return false;
+    }
+
+    memcpy(address, result->ai_addr, sizeof *address);
+    freeaddrinfo(result);
     return true;
 }
 
@@ -65,15 +85,18 @@ static void handle_client(int client_fd, int64_t read_deadline, const void *cont
 int main(int argc, char **argv)
 {
     uint16_t port = 8080;
+    uint16_t backend_port = 8001;
     const char *static_root = "/app/public";
+    const char *backend_host = "127.0.0.1";
     struct server_config config = {
-        .route_prefix = "/api/",
-        .backend = {.sin_family = AF_INET, .sin_port = htons(8001),
-                    .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}
+        .route_prefix = "/api/"
     };
-    if (!parse_options(argc, argv, &port, &static_root, &config)) {
+    if (!parse_options(argc, argv, &port, &static_root, &backend_host, &backend_port, &config)) {
         fprintf(stderr, "Usage: %s [--port PORT] [--static-root DIR] [--route-prefix PATH/] "
-                        "[--backend-address IPV4] [--backend-port PORT]\n", argv[0]);
+                        "[--backend-address HOST] [--backend-port PORT]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+    if (!resolve_backend(backend_host, backend_port, &config.backend)) {
         return EXIT_FAILURE;
     }
     config.static_root_fd = open(static_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
