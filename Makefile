@@ -8,8 +8,8 @@ FRONT_OBJECTS = build/server.o build/static.o build/proxy.o
 BACKEND_OBJECTS = build/backend.o
 OBJECTS = $(COMMON_OBJECTS) $(FRONT_OBJECTS) $(BACKEND_OBJECTS)
 PROGRAMS = build/guestbook build/guestbook-backend
-TEST_OBJECTS = build/test_http.o
-TEST_PROGRAMS = build/test_http
+TEST_OBJECTS = build/test_http.o build/test_static.o
+TEST_PROGRAMS = build/test_http build/test_static
 
 .PHONY: all clean test unit
 all: $(PROGRAMS)
@@ -20,7 +20,10 @@ build/guestbook: $(FRONT_OBJECTS) $(COMMON_OBJECTS)
 build/guestbook-backend: $(BACKEND_OBJECTS) $(COMMON_OBJECTS)
 	$(CC) $(LDFLAGS) $(THREAD_FLAGS) $^ $(LDLIBS) -o $@
 
-build/test_http: $(TEST_OBJECTS) $(COMMON_OBJECTS)
+build/test_http: build/test_http.o $(COMMON_OBJECTS)
+	$(CC) $(LDFLAGS) $(THREAD_FLAGS) $^ $(LDLIBS) -o $@
+
+build/test_static: build/test_static.o build/static.o $(COMMON_OBJECTS)
 	$(CC) $(LDFLAGS) $(THREAD_FLAGS) $^ $(LDLIBS) -o $@
 
 build/%.o: src/%.c | build
@@ -34,6 +37,7 @@ build:
 
 unit: $(TEST_PROGRAMS)
 	./build/test_http
+	./build/test_static
 
 test: all unit
 	PATH="$(CURDIR)/build:$$PATH" GUESTBOOK_STATIC_ROOT="$(CURDIR)/public" \

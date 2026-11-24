@@ -86,6 +86,32 @@ def check_static():
     print("Static HTML/CSS/JS and MIME: 200; missing file: 404", flush=True)
 
 
+def check_static_paths():
+    # 루트 밖을 가리키는 경로는 어떤 표기로 와도 파일 내용 대신 403이다 (#7).
+    _, _, index = framed(*exchange_raw(get(b"/index.html")))
+    cases = (
+        (403, b"/../../etc/passwd"),
+        (403, b"/%2e%2e/%2e%2e/etc/passwd"),
+        (403, b"/..%2f..%2fetc%2fpasswd"),
+        (403, b"/%2fetc%2fpasswd"),
+        (403, b"//etc/passwd"),
+        (403, b"/%5c..%5cetc%5cpasswd"),
+        (403, b"/index.html%00.png"),
+        (403, b"/index.html/"),
+        (400, b"/%zz"),
+        (404, b"/no-such-dir/index.html"),
+    )
+    for expected, target in cases:
+        status, _, body = framed(*exchange_raw(get(target)))
+        assert status == expected, (target, status)
+        assert b"root:" not in body, target
+    for target in (b"/%69ndex.html", b"/index.html?file=../../etc/passwd"):
+        status, headers, body = framed(*exchange_raw(get(target)))
+        assert (status, body) == (200, index), target
+        assert headers["content-type"] == "text/html; charset=utf-8", target
+    print("Static paths: traversal, encoded slash/backslash, NUL: 403; bad %XX: 400", flush=True)
+
+
 REQUEST_LINE_LIMIT = 8000
 HEADER_LIMIT = 8192
 REQUEST_HEAD_LIMIT = REQUEST_LINE_LIMIT + 2 + HEADER_LIMIT
@@ -358,6 +384,7 @@ def check_error_responses():
 
 
 def check_http_boundaries():
+    check_static_paths()
     check_limits()
     check_request_line()
     check_uri_grammar()

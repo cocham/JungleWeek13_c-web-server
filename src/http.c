@@ -749,6 +749,7 @@ static const char *reason_phrase(int status)
     switch (status) {
         case 200: return "OK";
         case 201: return "Created";
+        case 301: return "Moved Permanently";
         case 400: return "Bad Request";
         case 403: return "Forbidden";
         case 404: return "Not Found";
@@ -834,4 +835,22 @@ int send_error_for(int fd, const struct request *request, int status,
                    const char *allow, int64_t deadline)
 {
     return send_error_reply(fd, status, allow, request->head, deadline);
+}
+
+// location으로 옮겨 갔다는 301 응답을 보낸다. 요청이 HEAD면 헤더만 보낸다.
+// location은 호출한 쪽이 검증한 origin-form 경로여야 한다 (CR, LF가 없어야 한다).
+int send_redirect_for(int fd, const struct request *request, const char *location,
+                      int64_t deadline)
+{
+    static const char body[] = "Moved Permanently\n";
+    char header[HTTP_TARGET_LIMIT + 256];
+    int size = snprintf(header, sizeof header,
+        "HTTP/1.1 301 %s\r\nContent-Type: text/plain; charset=utf-8\r\n"
+        "Content-Length: %zu\r\nLocation: %s\r\nConnection: close\r\n\r\n",
+        reason_phrase(301), sizeof body - 1, location);
+    if (size < 0 || (size_t)size >= sizeof header ||
+        send_all(fd, header, (size_t)size, deadline) < 0) {
+        return -1;
+    }
+    return request->head ? 0 : send_all(fd, body, sizeof body - 1, deadline);
 }
