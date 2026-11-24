@@ -63,9 +63,9 @@ Windows PowerShell에서는 실행 파일 이름을 `curl.exe`로 적는다.
 docker compose run --rm --no-deps smoke
 ```
 
-HTML·CSS·JavaScript MIME, 없는 파일 404, 분할 POST와 재조회, 입력 오류, 동시 GET을 확인한다. `/api/echo`로 본문 바이트가 프록시를 그대로 통과하는지, `Content-Length` 과소·과대·조기 종료·시간 초과와 전송 인코딩 거부, 오류 응답마다 `Content-Length`와 실제 본문 길이·`Connection: close`가 맞는지도 확인한다. 정상 검사 한 번마다 검증용 글 한 건이 방명록에 남는다.
+HTML·CSS·JavaScript MIME, 없는 파일 404, 루트 밖을 가리키는 경로(`..`, `%2f`, `%5c`, NUL)의 403, 분할 POST와 재조회, 입력 오류, 동시 GET을 확인한다. `/api/echo`로 본문 바이트가 프록시를 그대로 통과하는지, `Content-Length` 과소·과대·조기 종료·시간 초과와 전송 인코딩 거부, 오류 응답마다 `Content-Length`와 실제 본문 길이·`Connection: close`가 맞는지도 확인한다. 정상 검사 한 번마다 검증용 글 한 건이 방명록에 남는다.
 
-HTTP 파서·응답 생성·`send_all()` 부분 송신은 `tests/test_http.c`가 `socketpair()`로 서버 없이 검사한다. 저장소를 읽기 전용으로 붙이고 컨테이너 안 복사본에서 빌드한다.
+HTTP 파서·응답 생성·`send_all()` 부분 송신은 `tests/test_http.c`가 `socketpair()`로 서버 없이 검사한다. 정적 파일 응답은 `tests/test_static.c`가 임시 문서 루트를 만들어 경로 탐색·URL 디코딩·심볼릭 링크 우회, 404/403 정책, MIME, 큰 파일의 길이와 조각별 송신 기한, 클라이언트 중도 종료 뒤 FD 회수를 검사한다. 권한 없는 파일의 403은 root가 아닌 사용자로 실행할 때만 확인된다. 저장소를 읽기 전용으로 붙이고 컨테이너 안 복사본에서 빌드한다.
 
 ```sh
 docker run --rm -v "$PWD:/repo:ro" gcc:14-trixie bash -c "cp -r /repo /tmp/w && make -C /tmp/w unit"
