@@ -52,6 +52,10 @@ enum upstream_result read_upstream_response(int fd, struct upstream_response *re
                                             int64_t deadline);
 size_t request_path_length(const struct request *request);
 
+// A request gets exactly one final response. Once any send_* call below has been made for it,
+// whether it returned 0 or -1, the caller sends nothing more: after a partial send the client
+// already has part of a response, and only closing the connection can end it. Each sender
+// returns 0 when every byte was sent, -1 on an I/O error or when the deadline passed.
 int send_response_head(int fd, int status, const char *content_type,
                        size_t length, const char *allow, int64_t deadline);
 int send_response(int fd, int status, const char *content_type,

@@ -94,12 +94,26 @@ HOST = b"Host: localhost\r\n"
 
 def exchange_raw(wire):
     """Send raw bytes and read until the server closes, returning (status, headers, body)."""
+    return exchange_pieces([wire])
+
+
+def exchange_pieces(pieces, gap=0.05, half_close=False):
+    """Send each piece after a pause, then read until the server closes."""
     with socket.create_connection(FRONT, timeout=5) as sock:
-        sock.sendall(wire)
+        for index, piece in enumerate(pieces):
+            if index:
+                time.sleep(gap)
+            sock.sendall(piece)
+        if half_close:
+            sock.shutdown(socket.SHUT_WR)
         received = bytearray()
         while chunk := sock.recv(65536):
             received.extend(chunk)
-    head, _, body = bytes(received).partition(b"\r\n\r\n")
+    return parse_response(bytes(received))
+
+
+def parse_response(received):
+    head, _, body = received.partition(b"\r\n\r\n")
     lines = head.decode("latin-1").split("\r\n")
     headers = {}
     for line in lines[1:]:
@@ -247,12 +261,110 @@ def check_expect():
     print("Expect 100-continue: 100 then 201 (ignored in HTTP/1.0); other expectations: 417")
 
 
+ECHO = "/api/echo"
+BODY_LIMIT = 4096
+
+
+def framed(status, headers, body, head=False):
+    """Check the framing of the one response read up to EOF and return it unchanged."""
+    assert headers.get("connection") == "close", (status, headers)
+    declared = int(headers["content-length"])
+    # Reading to EOF means nothing, such as a second response, follows the declared body.
+    assert len(body) == (0 if head else declared), (status, declared, len(body))
+    return status, headers, body
+
+
+def post_head(path, fields=b""):
+    return f"POST {path} HTTP/1.1\r\n".encode("ascii") + HOST + fields + b"\r\n"
+
+
+def length_field(length):
+    return f"Content-Length: {length}\r\n".encode("ascii")
+
+
+def check_body_boundaries():
+    # The backend echoes the body, so any byte the proxy changes, drops or adds shows up.
+    tricky = b"a\x00\r\n\r\nHTTP/1.1 200 OK\r\n\xff"
+    fields = length_field(len(tricky)) + b"Content-Type: application/x-test\r\n"
+    for label, pieces in (
+        ("with the head", [post_head(ECHO, fields) + tricky]),
+        ("after the head", [post_head(ECHO, fields), tricky[:4], tricky[4:]]),
+        ("empty line split", [post_head(ECHO, fields)[:-1], b"\n" + tricky]),
+    ):
+        status, headers, body = framed(*exchange_pieces(pieces))
+        assert (status, body) == (200, tricky), (label, status, body)
+        assert headers["content-type"] == "application/x-test", (label, headers)
+    status, _, body = framed(*exchange_raw(
+        post_head(ECHO, length_field(BODY_LIMIT)) + b"x" * BODY_LIMIT))
+    assert (status, len(body)) == (200, BODY_LIMIT), status
+    assert framed(*exchange_raw(post_head(ECHO, length_field(BODY_LIMIT + 1))))[0] == 413
+    print(f"Echo through the proxy: exact bytes with and after the head; {BODY_LIMIT} B: 200, "
+          "over: 413", flush=True)
+
+    # Content-Length smaller than what follows: only the declared bytes are the body.
+    status, _, body = framed(*exchange_raw(post_head(ECHO, length_field(3)) + b"abcdef"))
+    assert (status, body) == (200, b"abc"), (status, body)
+    # Larger than what follows: 400 when the client finishes, 408 when it just stops.
+    short = post_head(ECHO, length_field(10)) + b"abc"
+    assert framed(*exchange_pieces([short], half_close=True))[0] == 400
+    started = time.monotonic()
+    assert framed(*exchange_raw(short))[0] == 408
+    assert time.monotonic() - started >= 1.5, "408 before the read deadline"
+    for fields, expected in (
+        (b"Content-Length: abc\r\n", 400),
+        (b"Content-Length: -1\r\n", 400),
+        (b"Content-Length: 5, 5\r\n", 400),
+        (b"Content-Length: 5\r\nContent-Length: 5\r\n", 400),
+        (b"Content-Length: 99999999999999999999\r\n", 413),
+        (b"Transfer-Encoding: chunked\r\n", 501),
+        (b"Transfer-Encoding: chunked\r\nContent-Length: 5\r\n", 400),
+    ):
+        status = framed(*exchange_raw(post_head(ECHO, fields) + b"hello"))[0]
+        assert status == expected, (fields, status)
+    # GET and HEAD carry no content to the backend.
+    get_with_body = b"GET " + ECHO.encode() + b" HTTP/1.1\r\n" + HOST + length_field(2) + b"\r\nhi"
+    assert framed(*exchange_raw(get_with_body))[0] == 400
+    print("Content-Length under: declared bytes only; over: 400 on EOF, 408 on silence; "
+          "invalid: 400/413; Transfer-Encoding: 501", flush=True)
+
+
+def check_error_responses():
+    cases = (
+        (400, b"GET / HTTP/1.1\r\n\r\n"),
+        (403, get(b"/%2e%2e/etc/passwd")),
+        (404, get(b"/no-such-file")),
+        (405, post_head("/", length_field(0))),
+        (411, post_head(API)),
+        (413, post_head(API, length_field(BODY_LIMIT + 1))),
+        (414, get(line_of(REQUEST_LINE_LIMIT + 1))),
+        (417, post_head(API, b"Expect: nothing\r\n" + length_field(1)) + b"x"),
+        (431, get(b"/", fields_of(HEADER_LIMIT + 1))),
+        (501, get(b"/", method=b"PUT")),
+        (505, get(b"/", HOST, b"HTTP/2.0")),
+    )
+    for expected, wire in cases:
+        status, headers, body = framed(*exchange_raw(wire))
+        assert status == expected, (expected, status)
+        assert headers["content-type"] == "text/plain; charset=utf-8", headers
+        assert body.endswith(b"\n") and body.strip(), body
+        assert ("allow" in headers) == (status == 405), headers
+        if wire.startswith(b"GET "):
+            # HEAD gets the same error header fields without the content.
+            h_status, h_headers, _ = framed(*exchange_raw(b"HEAD" + wire[3:]), head=True)
+            assert h_status == expected and h_headers["content-length"] == str(len(body))
+    assert framed(*exchange_raw(post_head("/", length_field(0))))[1]["allow"] == "GET, HEAD"
+    codes = ", ".join(str(code) for code, _ in cases)
+    print(f"Error replies {codes}: one framed reply, Connection: close", flush=True)
+
+
 def check_http_boundaries():
     check_limits()
     check_request_line()
     check_uri_grammar()
     check_head()
     check_expect()
+    check_body_boundaries()
+    check_error_responses()
 
 
 def check_normal():

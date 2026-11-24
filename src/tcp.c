@@ -15,7 +15,7 @@
 #include <unistd.h>
 
 enum { LISTEN_BACKLOG = 64, ACCEPT_WAIT_MS = 250, OVERLOAD_WRITE_MS = 50,
-       WORKER_COUNT = 4, QUEUE_CAPACITY = 16 };
+       CLIENT_LINGER_MS = 1000, WORKER_COUNT = 4, QUEUE_CAPACITY = 16 };
 
 struct job {
     int client_fd;
@@ -162,6 +162,20 @@ static int open_listener(uint32_t bind_address, uint16_t port)
     return fd;
 }
 
+// 응답을 다 보낸 뒤 쓰기 방향만 닫아 FIN을 보내고, 클라이언트가 아직 보내는 바이트를
+// 연결이 닫히거나 시간이 다 될 때까지 읽어 버린다. 읽지 않은 바이트가 남은 채 close()하면
+// 커널이 RST를 보내 아직 전달되지 않은 응답까지 버릴 수 있다 (RFC 9112 §9.6).
+static void linger_client(int client_fd, int milliseconds)
+{
+    if (shutdown(client_fd, SHUT_WR) < 0) {
+        return;
+    }
+    int64_t deadline = deadline_after(milliseconds);
+    char discard[4096];
+    while (receive_bytes(client_fd, discard, sizeof discard, deadline) > 0) {
+    }
+}
+
 static void close_client(const struct pool *pool, int client_fd)
 {
     fprintf(stderr, "%s client_fd=%d closing\n", pool->name, client_fd);
@@ -186,6 +200,7 @@ static void *worker_main(void *context)
         pthread_mutex_unlock(&pool->mutex);
 
         pool->handler(job.client_fd, job.read_deadline, pool->context);
+        linger_client(job.client_fd, CLIENT_LINGER_MS);
         close_client(pool, job.client_fd);
     }
 }
@@ -246,6 +261,8 @@ static int accept_clients(int listener, struct pool *pool)
             close_client(pool, client_fd);
         } else if (!enqueue(pool, job)) {
             (void)send_error(client_fd, 503, NULL, deadline_after(OVERLOAD_WRITE_MS));
+            // The accept thread lingers only briefly so that overload does not stall accept().
+            linger_client(client_fd, OVERLOAD_WRITE_MS);
             close_client(pool, client_fd);
         }
     }
