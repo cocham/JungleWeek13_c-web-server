@@ -397,7 +397,7 @@ def check_normal():
     print(f"Concurrent GETs: {len(paths)}/{len(paths)} returned 200")
 
 
-def serve_one_response(listener, wire, received):
+def serve_one_response(listener, chunks, received):
     client, _ = listener.accept()
     with client:
         client.settimeout(5)
@@ -407,15 +407,17 @@ def serve_one_response(listener, wire, received):
             assert chunk and len(incoming) + len(chunk) <= 8192
             incoming.extend(chunk)
         received.set()
-        if wire is None:
+        if not chunks:
             # Keep the connection open until the front server's read deadline expires.
             while client.recv(4096):
                 pass
-        else:
-            client.sendall(wire)
+        for index, chunk in enumerate(chunks):
+            if index:
+                time.sleep(0.1)
+            client.sendall(chunk)
 
 
-def check_fake_upstream(expected, wire):
+def check_fake_upstream(expected, *chunks):
     with socket.socket() as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(UPSTREAM)
@@ -423,14 +425,29 @@ def check_fake_upstream(expected, wire):
         listener.settimeout(6)
         received = Event()
         with ThreadPoolExecutor(max_workers=2) as pool:
-            server = pool.submit(serve_one_response, listener, wire, received)
+            server = pool.submit(serve_one_response, listener, chunks, received)
             api = pool.submit(expect_status, expected, "GET", API)
             assert received.wait(timeout=5), "proxy did not send an upstream request"
-            if wire is None:
+            if not chunks:
                 expect_status(200, "GET", "/")
                 assert not api.done(), "expected the upstream request to still be pending"
-            api.result(timeout=6)
+            response = api.result(timeout=6)
             server.result(timeout=6)
+    expect_status(200, "GET", "/")
+    return response
+
+
+def check_connect_timeout():
+    # On Linux, listen(0) allows one pending connection. Leave it in the
+    # accept queue so the front server's new TCP handshake cannot complete.
+    with socket.create_server(UPSTREAM, backlog=0) as listener:
+        with socket.create_connection(UPSTREAM, timeout=5) as queued:
+            expect_status(504, "GET", API)
+            listener.settimeout(5)
+            first, peer = listener.accept()
+            with first:
+                assert peer == queued.getsockname()
+            assert not select.select([listener], [], [], 0)[0], "proxy TCP connection completed"
     expect_status(200, "GET", "/")
 
 
@@ -438,10 +455,22 @@ def check_upstream_failure():
     expect_status(502, "GET", API)
     expect_status(200, "GET", "/")
     print("Stopped backend: 502; static page: 200", flush=True)
-    check_fake_upstream(504, None)
+    check_connect_timeout()
+    print("Backend connect timeout: 504; static page: 200", flush=True)
+    check_fake_upstream(504)
     print("Nonresponding backend: 504; static page during and after: 200", flush=True)
     check_fake_upstream(502, b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nok")
     print("Truncated backend response: 502; static page: 200", flush=True)
+    chunked_head = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n"
+    media, body = check_fake_upstream(200, chunked_head + b"2\r\nhe\r\n", b"3\r\nllo\r\n0\r\n\r\n")
+    assert (media, body) == ("text/plain", b"hello"), (media, body)
+    print("Chunked backend response: 200 with exact body hello and Content-Length", flush=True)
+    check_fake_upstream(502, chunked_head + b"5\r\nhe")
+    print("Truncated chunked backend response: 502", flush=True)
+    media, body = check_fake_upstream(
+        200, b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhe", b"llo")
+    assert (media, body) == ("text/plain", b"hello"), (media, body)
+    print("Split backend response: 200 with exact body hello", flush=True)
 
 
 if __name__ == "__main__":

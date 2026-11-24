@@ -9,13 +9,14 @@
 #include <strings.h>
 
 enum wire_result { WIRE_OK, WIRE_EOF, WIRE_INVALID, WIRE_LIMIT, WIRE_TIMEOUT, WIRE_IO };
+enum transfer_coding { TRANSFER_NONE, TRANSFER_CHUNKED, TRANSFER_UNSUPPORTED };
 
 struct fields {
     const char *host;
     const char *length;
     const char *content_type;
     bool connection_content_type;
-    bool transfer_encoding;
+    enum transfer_coding transfer_encoding;
     bool expect_continue;
     bool expect_other;
 };
@@ -347,7 +348,9 @@ static bool parse_fields(char *cursor, struct fields *fields)
         } else if (strcasecmp(name, "Connection") == 0 && connection_names_content_type(value)) {
             fields->connection_content_type = true;
         } else if (strcasecmp(name, "Transfer-Encoding") == 0) {
-            fields->transfer_encoding = true;
+            fields->transfer_encoding =
+                fields->transfer_encoding == TRANSFER_NONE && strcasecmp(value, "chunked") == 0
+                    ? TRANSFER_CHUNKED : TRANSFER_UNSUPPORTED;
         } else if (strcasecmp(name, "Expect") == 0) {
             note_expectations(value, fields);
         }
@@ -420,6 +423,156 @@ static enum wire_result read_body(int fd, char *bytes, size_t used,
         used += (size_t)received;
     }
     return WIRE_OK;
+}
+
+struct chunk_input {
+    char bytes[HTTP_HEADER_LIMIT];
+    size_t offset;
+    size_t used;
+};
+
+static enum wire_result read_chunk_line(int fd, struct chunk_input *input,
+                                        char *line, size_t capacity, int64_t deadline)
+{
+    for (size_t length = 0; length < capacity; ++length) {
+        if (input->offset == input->used) {
+            ssize_t received = receive_bytes(fd, input->bytes, sizeof input->bytes, deadline);
+            if (received <= 0) {
+                return received < 0 && errno == ETIMEDOUT ? WIRE_TIMEOUT : WIRE_INVALID;
+            }
+            input->offset = 0;
+            input->used = (size_t)received;
+        }
+        char byte = input->bytes[input->offset++];
+        if (byte == '\n') {
+            if (length == 0 || line[length - 1] != '\r') {
+                return WIRE_INVALID;
+            }
+            line[length - 1] = '\0';
+            return valid_field_bytes(line) ? WIRE_OK : WIRE_INVALID;
+        }
+        if (byte == '\0') {
+            return WIRE_INVALID;
+        }
+        line[length] = byte;
+    }
+    return WIRE_LIMIT;
+}
+
+static size_t chunk_token_length(const char *text)
+{
+    return strspn(text, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+                       "!#$%&'*+-.^_\x60|~");
+}
+
+static bool valid_chunk_extensions(const char *text)
+{
+    while (*text != '\0') {
+        text += strspn(text, " \t");
+        if (*text++ != ';') {
+            return false;
+        }
+        text += strspn(text, " \t");
+        size_t length = chunk_token_length(text);
+        if (length == 0) {
+            return false;
+        }
+        text += length;
+        const char *equals = text + strspn(text, " \t");
+        if (*equals != '=') {
+            continue;
+        }
+        text = equals + 1;
+        text += strspn(text, " \t");
+        if (*text == '"') {
+            ++text;
+            while (*text != '\0' && *text != '"') {
+                if (*text == '\\' && text[1] != '\0') {
+                    ++text;
+                }
+                ++text;
+            }
+            if (*text++ != '"') {
+                return false;
+            }
+        } else {
+            length = chunk_token_length(text);
+            if (length == 0) {
+                return false;
+            }
+            text += length;
+        }
+    }
+    return true;
+}
+
+static bool parse_chunk_size(const char *line, size_t remaining, size_t *size)
+{
+    if (!is_hex(*line)) {
+        return false;
+    }
+    size_t value = 0;
+    for (; is_hex(*line); ++line) {
+        size_t digit = *line <= '9' ? (size_t)(*line - '0')
+                                   : (size_t)((*line | 0x20) - 'a' + 10);
+        if (value > remaining / 16 || (value == remaining / 16 && digit > remaining % 16)) {
+            return false;
+        }
+        value = value * 16 + digit;
+    }
+    *size = value;
+    return valid_chunk_extensions(line);
+}
+
+static enum wire_result read_chunked_body(int fd, char *body, size_t prefetched,
+                                          size_t *length, int64_t deadline)
+{
+    // Keep framing bytes separate so decoding cannot overwrite unread input.
+    struct chunk_input input = {.used = prefetched};
+    memcpy(input.bytes, body, prefetched);
+    char line[HTTP_HEADER_LIMIT];
+    *length = 0;
+    for (;;) {
+        enum wire_result result = read_chunk_line(fd, &input, line, sizeof line, deadline);
+        if (result != WIRE_OK) {
+            return result;
+        }
+        size_t size;
+        if (!parse_chunk_size(line, HTTP_UPSTREAM_BODY_LIMIT - *length, &size)) {
+            return WIRE_INVALID;
+        }
+        if (size == 0) {
+            break;
+        }
+        size_t available = input.used - input.offset;
+        size_t buffered = available < size ? available : size;
+        memcpy(body + *length, input.bytes + input.offset, buffered);
+        input.offset += buffered;
+        result = read_body(fd, body + *length, buffered, size, deadline);
+        if (result != WIRE_OK) {
+            return result;
+        }
+        *length += size;
+        result = read_chunk_line(fd, &input, line, sizeof "\r\n", deadline);
+        if (result != WIRE_OK || *line != '\0') {
+            return result == WIRE_OK ? WIRE_INVALID : result;
+        }
+    }
+
+    size_t trailer_budget = HTTP_HEADER_LIMIT;
+    for (;;) {
+        enum wire_result result = read_chunk_line(fd, &input, line, trailer_budget, deadline);
+        if (result != WIRE_OK) {
+            return result;
+        }
+        if (*line == '\0') {
+            return input.offset == input.used ? WIRE_OK : WIRE_INVALID;
+        }
+        trailer_budget -= strlen(line) + 2;
+        if (take_field_value(line) == NULL) {
+            return WIRE_INVALID;
+        }
+    }
 }
 
 // 읽기 결과를 클라이언트에 보낼 상태 코드로 바꾼다. 0은 응답할 수 없다는 뜻이다.
@@ -563,13 +716,22 @@ enum upstream_result read_upstream_response(int fd, struct upstream_response *re
     int status = parse_status_line(take_line(&cursor));
     struct fields fields = {0};
     size_t length;
-    if (status == 0 || !parse_fields(cursor, &fields) || fields.transfer_encoding ||
-        fields.length == NULL ||
-        parse_decimal(fields.length, HTTP_UPSTREAM_BODY_LIMIT, &length) != 0 ||
-        used > head_length + length) {
+    if (status == 0 || !parse_fields(cursor, &fields) ||
+        fields.transfer_encoding == TRANSFER_UNSUPPORTED ||
+        (fields.transfer_encoding == TRANSFER_CHUNKED && fields.length != NULL)) {
         return UPSTREAM_INVALID;
     }
-    result = read_body(fd, response->bytes, used, head_length + length, deadline);
+    if (fields.transfer_encoding == TRANSFER_CHUNKED) {
+        result = read_chunked_body(fd, response->bytes + head_length, used - head_length,
+                                   &length, deadline);
+    } else {
+        if (fields.length == NULL ||
+            parse_decimal(fields.length, HTTP_UPSTREAM_BODY_LIMIT, &length) != 0 ||
+            used > head_length + length) {
+            return UPSTREAM_INVALID;
+        }
+        result = read_body(fd, response->bytes, used, head_length + length, deadline);
+    }
     if (result != WIRE_OK) {
         return result == WIRE_TIMEOUT ? UPSTREAM_TIMEOUT : UPSTREAM_INVALID;
     }
