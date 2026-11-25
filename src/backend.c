@@ -233,14 +233,23 @@ static void handle_backend_connection(int client_fd, int64_t read_deadline, cons
 int main(int argc, char **argv)
 {
     uint16_t port = 8001;
-    if (argc != 1 && (argc != 3 || strcmp(argv[1], "--port") != 0 ||
-                     !parse_port(argv[2], &port))) {
-        fprintf(stderr, "Usage: %s [--port PORT]\n", argv[0]);
+    struct in_addr bind_address = {.s_addr = htonl(INADDR_LOOPBACK)};
+    for (int i = 1; i < argc; i += 2) {
+        if (i + 1 < argc) {
+            if (strcmp(argv[i], "--port") == 0 && parse_port(argv[i + 1], &port)) {
+                continue;
+            }
+            if (strcmp(argv[i], "--bind-address") == 0 &&
+                inet_pton(AF_INET, argv[i + 1], &bind_address) == 1) {
+                continue;
+            }
+        }
+        fprintf(stderr, "Usage: %s [--port PORT] [--bind-address IPV4]\n", argv[0]);
         return EXIT_FAILURE;
     }
     const char seed[] = "방명록에 오신 것을 환영합니다!";
     (void)store_message((struct http_body){seed, sizeof seed - 1});
-    int result = serve_tcp("backend", htonl(INADDR_LOOPBACK), port,
+    int result = serve_tcp("backend", bind_address.s_addr, port,
                            handle_backend_connection, NULL);
     pthread_mutex_destroy(&guestbook.mutex);
     return result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

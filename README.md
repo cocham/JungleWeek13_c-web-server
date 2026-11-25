@@ -52,8 +52,44 @@ Windows PowerShell에서는 실행 파일 이름을 `curl.exe`로 적는다.
 
 - TCP에서 한 번 읽은 양은 요청 경계와 무관하다. `\r\n\r\n`과 `Content-Length`로 경계를 확인하고 송신은 남은 바이트를 반복해 처리한다. 연결당 요청 하나와 `Connection: close`를 사용한다. 요청 줄 8000 옥텟, 요청 헤더 필드 8 KiB, 요청 본문 4 KiB에 상한을 둔다.
 - 앞단 읽기·쓰기는 각각 2초다. 백엔드 연결은 0.5초, 송신은 1초, 응답 전체 수신은 2초까지 기다린다. 큐 16칸이 가득 차면 503 송신을 시도하고 연결을 닫는다.
+- 백엔드를 여러 개 쓰려면 프런트에 `--backend localhost:8001 --backend localhost:8002`처럼 `--backend HOST:PORT`를 반복해서 지정한다. 최대 16개까지 등록 순서대로 번갈아 선택한다. 기존 `--backend-address`와 `--backend-port`는 단일 백엔드 설정에 사용한다.
+- 선택된 백엔드가 실패하면 해당 요청에 `502` 또는 `504`를 보내며 자동 재시도는 하지 않는다. 방명록 백엔드를 여러 개 띄우면 각 프로세스의 메모리에 별도로 저장되므로 공유 저장소가 없는 상태에서는 GET 결과가 백엔드별로 다를 수 있다.
+
 - 연결 거부, 응답 상태·헤더 오류, 8 KiB 헤더 또는 64 KiB 본문 한도 초과, 응답 도중 EOF는 502다. 백엔드 연결·송신·수신 기한이 지나면 504다. 프록시는 HTTP/1.1 백엔드 최종 응답의 단일 `Content-Length` 또는 `Transfer-Encoding: chunked`를 읽고, 클라이언트에는 완성된 본문과 `Content-Length`를 보낸다. 연결 종료로 길이를 구분하는 응답과 1xx·204·304는 502로 처리한다.
 - 정적 파일은 루트 FD에서 시작해 `openat()`으로 각 경로 요소를 열고 심볼릭 링크를 거부한다. `SIGINT`·`SIGTERM`은 수락을 멈추고 대기 큐를 닫은 뒤 작업자 종료를 기다린다. 버퍼 수명과 예외 경로의 FD 정리 규칙은 `DESIGN.md`에 있다.
+
+## 별도 서버에 백엔드 두 대 띄우기
+
+아래 명령은 각 Linux 서버에서 `make`로 빌드한 뒤 실행한다. 예시 IP는 각 백엔드가 가진 실제 사설 IPv4 주소로 바꾸고, 백엔드 방화벽에서는 프런트가 출발지인 TCP 8001 연결을 허용한다.
+
+```bash
+# 백엔드 A에서
+./build/guestbook-backend --bind-address 10.0.0.11 --port 8001
+
+# 백엔드 B에서
+./build/guestbook-backend --bind-address 10.0.0.12 --port 8001
+
+# 프런트에서
+./build/guestbook --static-root public \
+  --backend 10.0.0.11:8001 --backend 10.0.0.12:8001
+```
+
+`--bind-address`의 기본값은 `127.0.0.1`이다. 별도 네트워크를 쓰는 컨테이너에서는 백엔드를 `--bind-address 0.0.0.0`으로 띄우고, 프런트의 `--backend`에 각 서비스 이름과 포트를 지정할 수 있다.
+
+### Windows PowerShell에서 Docker로 재현하기
+
+Docker Desktop이 실행 중일 때 프로젝트 루트에서 실행한다. 프런트만 호스트의 `18080` 포트로 공개한다.
+
+```powershell
+docker build -t guestbook-rr .
+docker network create guestbook-rr
+docker run --rm -d --name rr-backend-a --network guestbook-rr --entrypoint /usr/local/bin/guestbook-backend guestbook-rr --bind-address 0.0.0.0
+docker run --rm -d --name rr-backend-b --network guestbook-rr --entrypoint /usr/local/bin/guestbook-backend guestbook-rr --bind-address 0.0.0.0
+docker run --rm -d --name rr-front --network guestbook-rr -p 127.0.0.1:18080:8080 guestbook-rr --backend rr-backend-a:8001 --backend rr-backend-b:8001
+curl.exe -i http://127.0.0.1:18080/api/messages
+```
+
+백엔드가 번갈아 호출되는지 보려면 GET을 두 번 보낸 뒤 `docker logs rr-backend-a`와 `docker logs rr-backend-b`에서 각각 연결을 받은 로그를 확인한다. 실습을 마치면 `docker stop rr-front rr-backend-a rr-backend-b`와 `docker network rm guestbook-rr`로 정리한다.
 
 ## Docker에서 자동 검사
 

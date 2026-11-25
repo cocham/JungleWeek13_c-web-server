@@ -10,6 +10,27 @@
 #include <string.h>
 #include <unistd.h>
 
+static bool resolve_backend(const char *host, uint16_t port, struct sockaddr_in *address);
+
+static bool add_backend(struct backend_pool *pool, const char *endpoint)
+{
+    const char *colon = strchr(endpoint, ':');
+    char host[256];
+    uint16_t port;
+    if (pool->count == BACKEND_LIMIT || colon == NULL || colon == endpoint ||
+        (size_t)(colon - endpoint) >= sizeof host || !parse_port(colon + 1, &port)) {
+        return false;
+    }
+    size_t length = (size_t)(colon - endpoint);
+    memcpy(host, endpoint, length);
+    host[length] = '\0';
+    if (!resolve_backend(host, port, &pool->addresses[pool->count])) {
+        return false;
+    }
+    ++pool->count;
+    return true;
+}
+
 static bool valid_route_prefix(const char *prefix)
 {
     size_t length = strlen(prefix);
@@ -21,6 +42,7 @@ static bool parse_options(int argc, char **argv, uint16_t *port,
                           const char **static_root, const char **backend_host,
                           uint16_t *backend_port, struct server_config *config)
 {
+    bool single_backend = false;
     for (int i = 1; i < argc; i += 2) {
         if (i + 1 == argc) {
             return false;
@@ -37,15 +59,21 @@ static bool parse_options(int argc, char **argv, uint16_t *port,
             config->route_prefix = value;
         } else if (strcmp(option, "--backend-address") == 0) {
             *backend_host = value;
+            single_backend = true;
         } else if (strcmp(option, "--backend-port") == 0) {
             if (!parse_port(value, backend_port)) {
+                return false;
+            }
+            single_backend = true;
+        } else if (strcmp(option, "--backend") == 0) {
+            if (!add_backend(config->backends, value)) {
                 return false;
             }
         } else {
             return false;
         }
     }
-    return true;
+    return !single_backend || config->backends->count == 0;
 }
 
 static bool resolve_backend(const char *host, uint16_t port, struct sockaddr_in *address)
@@ -88,16 +116,23 @@ int main(int argc, char **argv)
     uint16_t backend_port = 8001;
     const char *static_root = "/app/public";
     const char *backend_host = "127.0.0.1";
+    struct backend_pool backends = {0};
+    atomic_init(&backends.next, 0);
     struct server_config config = {
-        .route_prefix = "/api/"
+        .route_prefix = "/api/",
+        .backends = &backends
     };
     if (!parse_options(argc, argv, &port, &static_root, &backend_host, &backend_port, &config)) {
         fprintf(stderr, "Usage: %s [--port PORT] [--static-root DIR] [--route-prefix PATH/] "
-                        "[--backend-address HOST] [--backend-port PORT]\n", argv[0]);
+                        "[[--backend-address HOST] [--backend-port PORT] | "
+                        "--backend HOST:PORT [--backend HOST:PORT ...]]\n", argv[0]);
         return EXIT_FAILURE;
     }
-    if (!resolve_backend(backend_host, backend_port, &config.backend)) {
-        return EXIT_FAILURE;
+    if (backends.count == 0) {
+        if (!resolve_backend(backend_host, backend_port, &backends.addresses[0])) {
+            return EXIT_FAILURE;
+        }
+        backends.count = 1;
     }
     config.static_root_fd = open(static_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (config.static_root_fd < 0) {

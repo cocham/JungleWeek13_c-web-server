@@ -96,6 +96,17 @@ static int proxy_request(int client_fd, const struct request *request,
                              response.body, deadline);
 }
 
+static const struct sockaddr_in *next_backend(struct backend_pool *pool)
+{
+    size_t index = atomic_load_explicit(&pool->next, memory_order_relaxed);
+    // Only the cursor is mutable once the workers start.
+    while (!atomic_compare_exchange_weak_explicit(&pool->next, &index,
+                                                  (index + 1) % pool->count,
+                                                  memory_order_relaxed, memory_order_relaxed)) {
+    }
+    return &pool->addresses[index];
+}
+
 int route_request(int client_fd, const struct request *request, const struct server_config *config)
 {
     int64_t deadline = deadline_after(CLIENT_WRITE_MS);
@@ -108,7 +119,7 @@ int route_request(int client_fd, const struct request *request, const struct ser
         if (is_get && request->body.length != 0) {
             return send_error_for(client_fd, request, 400, NULL, deadline);
         }
-        return proxy_request(client_fd, request, &config->backend);
+        return proxy_request(client_fd, request, next_backend(config->backends));
     }
     if (!is_get) {
         return send_error_for(client_fd, request, 405, "GET, HEAD", deadline);
